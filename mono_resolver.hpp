@@ -3,7 +3,7 @@
 // mono_resolver.hpp (v1.0)
 // - Lazy export binding
 // - RAII ThreadScope
-// - Status-based Result<T>, analog zu il2cpp_resolver
+// - Status-based Result<T>
 // - Enum-Reflection over Mono-API
 // ===============================
 
