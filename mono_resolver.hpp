@@ -1,10 +1,7 @@
 #pragma once
+
 // ===============================
 // mono_resolver.hpp (v1.0)
-// - Lazy export binding
-// - RAII ThreadScope
-// - Status-based Result<T>
-// - Enum-Reflection over Mono-API
 // ===============================
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -23,8 +20,6 @@
 #include <vector>
 #include <algorithm>
 #include <cstring>
-
-#include "../../../Loggy/loggy.hpp"
 
 #define MONO_DLL_CANDIDATE_1 "mono-2.0-bdwgc.dll"
 #define MONO_DLL_CANDIDATE_2 "mono-2.0-sgen.dll"
@@ -167,7 +162,7 @@ namespace mono {
             return { MonoStatus::OK, p };
         }
 
-        // ===== Gebundene Funktionspointer =====
+        // ===== Bound function pointers =====
 
         // Domain / Thread
         inline MonoDomain* (__cdecl* mono_get_root_domain)() = nullptr;
@@ -210,9 +205,11 @@ namespace mono {
         inline char* (__cdecl* mono_string_to_utf8)(MonoString*) = nullptr;
         inline void(__cdecl* mono_free)(void*) = nullptr;
 
-        inline MonoClass* (__cdecl* mono_get_enum_class)() = nullptr; // optional, meist nicht nötig
+        inline MonoClass* (__cdecl* mono_get_enum_class)() = nullptr; // optional, usually not needed
         inline mono::_internal::MonoType* (__cdecl* mono_field_get_type)(MonoClassField*) = nullptr; // optional
         inline mono::_internal::MonoClass* (__cdecl* mono_type_get_class)(MonoType*) = nullptr;      // optional
+        inline mono::_internal::MonoType* (__cdecl* mono_class_get_type)(MonoClass*) = nullptr;      // optional
+        inline MonoObject* (__cdecl* mono_type_get_object)(MonoDomain*, MonoType*) = nullptr;       // optional
         inline mono::_internal::MonoDomain* (__cdecl* mono_object_get_domain)(MonoObject*) = nullptr; // optional
 
         // Array
@@ -290,6 +287,8 @@ namespace mono {
             bind_opt(mono_get_enum_class, "mono_get_enum_class");
             bind_opt(mono_field_get_type, "mono_field_get_type");
             bind_opt(mono_type_get_class, "mono_type_get_class");
+            bind_opt(mono_class_get_type, "mono_class_get_type");
+            bind_opt(mono_type_get_object, "mono_type_get_object");
             bind_opt(mono_object_get_domain, "mono_object_get_domain");
             bind_opt(mono_object_get_class, "mono_object_get_class");
             bind_opt(mono_class_is_enum, "mono_class_is_enum");
@@ -300,9 +299,7 @@ namespace mono {
         // Assembly-Lookup + Cache
         inline Result<MonoAssembly*> find_assembly(std::string_view assembly_name) {
             if (assembly_name.empty()) return { MonoStatus::InvalidArgs, nullptr };
-            LOG(LogLevel::INFO, "ensure_exports...");
             if (auto s = ensure_exports(); s != MonoStatus::OK) return { s, nullptr };
-            LOG(LogLevel::INFO, "ensure_exports done");
 
             {
                 std::scoped_lock lk(g_cache_mtx);
@@ -311,10 +308,7 @@ namespace mono {
             }
 
             auto* domain = mono_get_root_domain ? mono_get_root_domain() : nullptr;
-            if (!domain) {
-                LOG(LogLevel::WARN, "get_root_domain failed");
-                return { MonoStatus::DomainUnavailable, nullptr };
-            }
+            if (!domain) return { MonoStatus::DomainUnavailable, nullptr };
 
             MonoAssembly* ass = nullptr;
 
@@ -334,19 +328,13 @@ namespace mono {
                     const char* n = mono_assembly_name_get_name(aname);
                     if (n && c->simple && std::strcmp(n, c->simple) == 0)
                         c->found = a;
-                }, &ctx);
+                    }, &ctx);
                 ass = ctx.found;
-                if (ass) LOG(LogLevel::INFO, "found loaded assembly: ", simple_name);
             }
 
             if (!ass) {
-                LOG(LogLevel::INFO, "assembly_open ", aname_str, " ...");
                 ass = mono_domain_assembly_open(domain, aname_str.c_str());
-                if (!ass) {
-                    LOG(LogLevel::WARN, "assembly_open failed");
-                    return { MonoStatus::AssemblyNotFound, nullptr };
-                }
-                LOG(LogLevel::INFO, "assembly_open done");
+                if (!ass) return { MonoStatus::AssemblyNotFound, nullptr };
             }
 
             {
@@ -405,50 +393,27 @@ namespace mono {
         if (class_name.empty() || assembly_name.empty())
             return { MonoStatus::InvalidArgs, nullptr };
 
-        LOG(LogLevel::INFO, "find_assembly...");
         auto a = _internal::find_assembly(assembly_name);
-        if (!a) {
-            LOG(LogLevel::WARN, "find_assembly failed: ", to_string(a.status));
-            return { a.status, nullptr };
-        }
-        LOG(LogLevel::INFO, "find_assembly done");
+        if (!a) return { a.status, nullptr };
 
-        LOG(LogLevel::INFO, "get_image...");
         auto* img = _internal::mono_assembly_get_image ? _internal::mono_assembly_get_image(a.value) : nullptr;
-        if (!img) {
-            LOG(LogLevel::WARN, "get_image failed");
-            return { MonoStatus::ImageUnavailable, nullptr };
-        }
-        LOG(LogLevel::INFO, "get_image done");
+        if (!img) return { MonoStatus::ImageUnavailable, nullptr };
 
-        LOG(LogLevel::INFO, "class_from_name...");
         auto* klass = _internal::mono_class_from_name(img, ns.c_str(), class_name.c_str());
-        if (!klass) {
-            LOG(LogLevel::WARN, "class_from_name failed");
-            return { MonoStatus::ClassNotFound, nullptr };
-        }
-        LOG(LogLevel::INFO, "class_from_name done");
+        if (!klass) return { MonoStatus::ClassNotFound, nullptr };
         return { MonoStatus::OK, klass };
     }
 
     inline Result<_internal::MonoMethod*>
         get_method(const std::string& ns, const std::string& class_name, const std::string& method_name,
             const std::string& assembly_name, std::optional<int> param_count = std::nullopt) {
-        LOG(LogLevel::INFO, "ThreadScope creating...");
         ThreadScope scope;
-        LOG(LogLevel::INFO, "ThreadScope done");
         if (class_name.empty() || method_name.empty() || assembly_name.empty())
             return { MonoStatus::InvalidArgs, nullptr };
 
-        LOG(LogLevel::INFO, "find_class...");
         auto c = find_class(ns, class_name, assembly_name);
-        if (!c) {
-            LOG(LogLevel::WARN, "find_class failed: ", to_string(c.status));
-            return { c.status, nullptr };
-        }
-        LOG(LogLevel::INFO, "find_class done");
+        if (!c) return { c.status, nullptr };
 
-        LOG(LogLevel::INFO, "get_method_from_name...");
         using MM = _internal::MonoMethod*;
         MM mi = nullptr;
 
@@ -461,11 +426,37 @@ namespace mono {
                 mi = _internal::mono_class_get_method_from_name(c.value, method_name.c_str(), i);
         }
 
-        if (!mi) {
-            LOG(LogLevel::WARN, "get_method_from_name failed");
-            return { MonoStatus::MethodNotFound, nullptr };
+        if (!mi) return { MonoStatus::MethodNotFound, nullptr };
+        return { MonoStatus::OK, mi };
+    }
+
+    inline Result<_internal::MonoClass*> get_object_class(void* obj) {
+        ThreadScope scope;
+        if (!obj) return { MonoStatus::InvalidArgs, nullptr };
+        if (!_internal::mono_object_get_class) {
+            if (auto s = _internal::ensure_exports(); s != MonoStatus::OK) return { s, nullptr };
+            if (!_internal::mono_object_get_class) return { MonoStatus::InvalidArgs, nullptr };
         }
-        LOG(LogLevel::INFO, "get_method_from_name done");
+        auto* klass = _internal::mono_object_get_class(reinterpret_cast<_internal::MonoObject*>(obj));
+        if (!klass) return { MonoStatus::ClassNotFound, nullptr };
+        return { MonoStatus::OK, klass };
+    }
+
+    inline Result<_internal::MonoMethod*>
+        get_method_from_class(_internal::MonoClass* klass, const std::string& method_name,
+            std::optional<int> param_count = std::nullopt) {
+        ThreadScope scope;
+        if (!klass || method_name.empty()) return { MonoStatus::InvalidArgs, nullptr };
+        using MM = _internal::MonoMethod*;
+        MM mi = nullptr;
+        if (param_count.has_value()) {
+            mi = _internal::mono_class_get_method_from_name(klass, method_name.c_str(), *param_count);
+        }
+        else {
+            for (int i = 0; i <= 16 && !mi; ++i)
+                mi = _internal::mono_class_get_method_from_name(klass, method_name.c_str(), i);
+        }
+        if (!mi) return { MonoStatus::MethodNotFound, nullptr };
         return { MonoStatus::OK, mi };
     }
 
@@ -590,7 +581,7 @@ namespace mono {
             auto mi_ctor = get_method(ns, class_name, ".ctor", assembly_name, sizeof...(CtorArgs));
             if (!mi_ctor) return { mi_ctor.status, nullptr };
 
-            // ctor_args → runtime_invoke, Ergebnis ignorieren
+            // ctor_args → runtime_invoke, result ignored
             void* argv[sizeof...(CtorArgs)] = { reinterpret_cast<void*>(&ctor_args)... };
             _internal::MonoObject* exc = nullptr;
             _internal::MonoObject* res = _internal::mono_runtime_invoke(mi_ctor.value,
@@ -671,7 +662,8 @@ namespace mono {
 
         if constexpr (sizeof...(Args) == 0) {
             result = _internal::mono_runtime_invoke(method, instance, nullptr, &exc);
-        } else {
+        }
+        else {
             void* argv[sizeof...(Args)] = { reinterpret_cast<void*>(&args)... };
             result = _internal::mono_runtime_invoke(method, instance, argv, &exc);
         }
@@ -685,7 +677,7 @@ namespace mono {
             return R{ MonoStatus::OK };
         }
         else if constexpr (std::is_pointer_v<Ret>) {
-            // Referenztypen: direkter MonoObject*-Return
+            // Reference types: direct MonoObject* return
             return R{ MonoStatus::OK, reinterpret_cast<Ret>(result) };
         }
         else {
@@ -780,7 +772,7 @@ namespace mono {
             auto klass = find_class(key.ns, key.name, key.assembly);
             if (!klass) return { klass.status, nullptr };
 
-            // Wenn mono_class_is_enum fehlt, überspringen wir den Check
+            // If mono_class_is_enum is missing, skip the check
             if (_internal::mono_class_is_enum && !_internal::mono_class_is_enum(klass.value))
                 return { MonoStatus::InvalidArgs, nullptr };
 
@@ -795,7 +787,7 @@ namespace mono {
                 const char* fname = _internal::mono_field_get_name(fi);
                 if (!fname || std::strcmp(fname, "value__") == 0) continue;
 
-                // Enum-Werte via value_object + unbox holen
+                // Get enum values via value_object + unbox
                 auto* domain = _internal::mono_get_root_domain ? _internal::mono_get_root_domain() : nullptr;
                 if (!domain) break;
 
@@ -884,52 +876,53 @@ namespace mono {
 
     // ---------- Unity Helpers ----------
 
-    // FindAnyObjectByType: Wrapper für UnityEngine.Object.FindAnyObjectByType(Type)
-    // In Unity/Mono kann MonoClass* oft direkt als System.Type verwendet werden
+    // FindAnyObjectByType: Wrapper for UnityEngine.Object.FindAnyObjectByType(Type).
+    // Create System.Type from MonoClass via mono_class_get_type + mono_type_get_object.
     inline Result<void*> FindAnyObjectByType(_internal::MonoClass* klass) {
         ThreadScope scope;
         if (!klass) return { MonoStatus::InvalidArgs, nullptr };
+        { auto s = _internal::ensure_exports(); if (s != MonoStatus::OK) return { s, nullptr }; }
 
-        // UnityEngine.Object Klasse finden
-        auto obj_class = find_class("UnityEngine", "Object", "UnityEngine.CoreModule");
-        if (!obj_class) return { obj_class.status, nullptr };
+        auto* domain = _internal::mono_get_root_domain ? _internal::mono_get_root_domain() : nullptr;
+        if (!domain) return { MonoStatus::DomainUnavailable, nullptr };
+        if (!_internal::mono_class_get_type || !_internal::mono_type_get_object)
+            return { MonoStatus::InvalidArgs, nullptr };
 
-        // FindAnyObjectByType Methode finden (statische Methode mit 1 Parameter: Type)
+        _internal::MonoType* type = _internal::mono_class_get_type(klass);
+        if (!type) return { MonoStatus::InvalidArgs, nullptr };
+        _internal::MonoObject* type_obj = _internal::mono_type_get_object(domain, type);
+        if (!type_obj) return { MonoStatus::InvalidArgs, nullptr };
+
         auto find_method = get_method("UnityEngine", "Object", "FindAnyObjectByType", "UnityEngine.CoreModule", 1);
         if (!find_method) return { find_method.status, nullptr };
 
-        // In Unity/Mono kann MonoClass* direkt als System.Type verwendet werden
-        // Wir casten klass direkt zu void* (Type ist ein managed Object)
-        void* type_obj = reinterpret_cast<void*>(klass);
-
-        // Methode aufrufen (statisch, instance = nullptr)
         void* argv[1] = { type_obj };
         _internal::MonoObject* exc = nullptr;
         _internal::MonoObject* result = _internal::mono_runtime_invoke(
             find_method.value,
-            nullptr, // statische Methode
+            nullptr,
             argv,
             &exc
         );
 
         if (exc) return { MonoStatus::InvokeException, nullptr };
-        if (!result) return { MonoStatus::OK, nullptr }; // null Object (kein Objekt gefunden)
+        if (!result) return { MonoStatus::OK, nullptr };
 
         return { MonoStatus::OK, result };
     }
 
-    // Overload: FindAnyObjectByType mit Namespace, Class-Name und Assembly
+    // Overload: FindAnyObjectByType with namespace, class name and assembly
     inline Result<void*> FindAnyObjectByType(
-        const std::string& ns, 
-        const std::string& class_name, 
+        const std::string& ns,
+        const std::string& class_name,
         const std::string& assembly_name) {
         auto klass = find_class(ns, class_name, assembly_name);
         if (!klass) return { klass.status, nullptr };
         return FindAnyObjectByType(klass.value);
     }
 
-    // MonoSingleton<T>-style Instance-Zugriff: Property "Instance" oder Methode "get_Instance",
-    // in Klasse oder Basisklassen. Gibt den Getter-MonoMethod* zurück.
+    // MonoSingleton<T>-style instance access: property "Instance" or method "get_Instance",
+    // in class or base classes. Returns the getter MonoMethod*.
     inline Result<_internal::MonoMethod*> get_instance_accessor(
         const std::string& ns, const std::string& class_name, const std::string& assembly_name) {
         ThreadScope scope;
