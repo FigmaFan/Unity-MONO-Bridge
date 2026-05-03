@@ -274,7 +274,7 @@ Public domain / Unlicense — see [LICENSE](LICENSE).
 [license-url]: https://github.com/FigmaFan/Unity-MONO-Bridge/blob/master/LICENSE
 [stars-shield]: https://img.shields.io/github/stars/FigmaFan/unity-mono-bridge.svg?style=for-the-badge
 [stars-url]: https://github.com/FigmaFan/unity_mono_bridge/stargazers
-[forks-shield]: https://img.shields.io/github/forks/FigmaFan/Unity-MONO-Bridge.svg?style=for-the-badge
-[forks-url]: https://github.com/FigmaFan/Unity-MONO-Bridge/network/members
-[contributors-shield]: https://img.shields.io/github/contributors/FigmaFan/Unity-MONO-Bridge.svg?style=for-the-badge
-[contributors-url]: https://github.com/FigmaFan/Unity-MONO-Bridge/graphs/contributors
+[forks-shield]: https://img.shields.io/github/forks/FigmaFan/unity-mono-bridge.svg?style=for-the-badge
+[forks-url]: https://github.com/FigmaFan/unity-mono-bridge/network/members
+[contributors-shield]: https://img.shields.io/github/contributors/FigmaFan/unity-mono-bridge.svg?style=for-the-badge
+[contributors-url]: https://github.com/FigmaFan/unity-mono-bridge/graphs/contributors
