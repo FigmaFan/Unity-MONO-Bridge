@@ -270,10 +270,10 @@ Contributions are welcome. Please include a minimal repro and test against the c
 
 Public domain / Unlicense — see [LICENSE](LICENSE).
 
-[license-shield]: https://img.shields.io/github/license/FigmaFan/Unity-MONO-Bridge.svg?style=for-the-badge
+[license-shield]: https://img.shields.io/github/license/FigmaFan/unity-mono-bridge.svg?style=for-the-badge
 [license-url]: https://github.com/FigmaFan/Unity-MONO-Bridge/blob/master/LICENSE
-[stars-shield]: https://img.shields.io/github/stars/FigmaFan/Unity-MONO-Bridge.svg?style=for-the-badge
-[stars-url]: https://github.com/FigmaFan/your_repo/stargazers
+[stars-shield]: https://img.shields.io/github/stars/FigmaFan/unity-mono-bridge.svg?style=for-the-badge
+[stars-url]: https://github.com/FigmaFan/unity_mono_bridge/stargazers
 [forks-shield]: https://img.shields.io/github/forks/FigmaFan/Unity-MONO-Bridge.svg?style=for-the-badge
 [forks-url]: https://github.com/FigmaFan/Unity-MONO-Bridge/network/members
 [contributors-shield]: https://img.shields.io/github/contributors/FigmaFan/Unity-MONO-Bridge.svg?style=for-the-badge
