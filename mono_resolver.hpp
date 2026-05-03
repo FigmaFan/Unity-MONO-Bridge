@@ -1,8 +1,5 @@
 #pragma once
-
-// ===============================
-// mono_resolver.hpp (v1.0)
-// ===============================
+// mono_resolver.hpp (v1.0): lazy export binding, RAII ThreadScope, Result<T> statuses, array helpers, enum reflection, unity engine utils
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -20,6 +17,8 @@
 #include <vector>
 #include <algorithm>
 #include <cstring>
+
+#include "Loggy/loggy.hpp"
 
 #define MONO_DLL_CANDIDATE_1 "mono-2.0-bdwgc.dll"
 #define MONO_DLL_CANDIDATE_2 "mono-2.0-sgen.dll"
@@ -93,9 +92,7 @@ namespace mono {
 
         struct _MonoDomain;
         struct _MonoAssembly;
-        struct _MonoAssemblyName;
         struct _MonoImage;
-        struct _MonoProperty;
         struct _MonoClass;
         struct _MonoMethod;
         struct _MonoString;
@@ -108,9 +105,7 @@ namespace mono {
 
         using MonoDomain = _MonoDomain;
         using MonoAssembly = _MonoAssembly;
-        using MonoAssemblyName = _MonoAssemblyName;
         using MonoImage = _MonoImage;
-        using MonoProperty = _MonoProperty;
         using MonoClass = _MonoClass;
         using MonoMethod = _MonoMethod;
         using MonoString = _MonoString;
@@ -122,32 +117,46 @@ namespace mono {
         using MonoThread = _MonoThread;
 
         inline HMODULE g_mono_module = nullptr;
+        inline std::once_flag g_mono_module_once;
         inline std::unordered_map<std::string, MonoAssembly*> g_assembly_cache;
         inline std::mutex g_cache_mtx;
 
-        // ===== Module-Handling =====
-        inline Result<HMODULE> ensure_mono_module() {
-            if (g_mono_module) return { MonoStatus::OK, g_mono_module };
+        inline std::unordered_map<std::string, MonoImage*> g_image_cache;
+        inline std::mutex g_image_cache_mtx;
 
-            const char* candidates[] = {
-                MONO_DLL_CANDIDATE_1,
-                MONO_DLL_CANDIDATE_2,
-                MONO_DLL_CANDIDATE_3
-            };
-
-            constexpr int MAX_ITERATIONS = 200;
-            constexpr int SLEEP_MS = 10;
-
-            for (int i = 0; i < MAX_ITERATIONS && !g_mono_module; ++i) {
-                for (auto* name : candidates) {
-                    HMODULE h = ::GetModuleHandleA(name);
-                    if (h) {
-                        g_mono_module = h;
-                        break;
-                    }
-                }
-                if (!g_mono_module) ::Sleep(SLEEP_MS);
+        // mono_runtime_invoke: value types need &arg in argv; reference types need the pointer value (not &ptr)
+        template <typename T>
+        inline void* mono_arg_ptr(T& arg) noexcept {
+            if constexpr (std::is_pointer_v<std::remove_reference_t<T>>) {
+                return reinterpret_cast<void*>(arg);
             }
+            else {
+                return reinterpret_cast<void*>(&arg);
+            }
+        }
+
+        inline Result<HMODULE> ensure_mono_module() {
+            std::call_once(g_mono_module_once, [] {
+                const char* candidates[] = {
+                    MONO_DLL_CANDIDATE_1,
+                    MONO_DLL_CANDIDATE_2,
+                    MONO_DLL_CANDIDATE_3
+                };
+
+                constexpr int MAX_ITERATIONS = 200;
+                constexpr int SLEEP_MS = 10;
+
+                for (int i = 0; i < MAX_ITERATIONS && !g_mono_module; ++i) {
+                    for (auto* name : candidates) {
+                        HMODULE h = ::GetModuleHandleA(name);
+                        if (h) {
+                            g_mono_module = h;
+                            break;
+                        }
+                    }
+                    if (!g_mono_module) ::Sleep(SLEEP_MS);
+                }
+            });
 
             if (!g_mono_module) return { MonoStatus::MonoModuleNotFound, nullptr };
             return { MonoStatus::OK, g_mono_module };
@@ -162,27 +171,21 @@ namespace mono {
             return { MonoStatus::OK, p };
         }
 
-        // ===== Bound function pointers =====
-
-        // Domain / Thread
         inline MonoDomain* (__cdecl* mono_get_root_domain)() = nullptr;
         inline MonoThread* (__cdecl* mono_thread_attach)(MonoDomain*) = nullptr;
-        inline void(__cdecl* mono_thread_detach)(MonoThread*) = nullptr; // optional
-        inline MonoThread* (__cdecl* mono_thread_current)() = nullptr;           // optional
+        inline void(__cdecl* mono_thread_detach)(MonoThread*) = nullptr;
+        inline MonoThread* (__cdecl* mono_thread_current)() = nullptr;
 
-        // Assembly & Image
         inline MonoAssembly* (__cdecl* mono_domain_assembly_open)(MonoDomain*, const char*) = nullptr;
         inline MonoImage* (__cdecl* mono_assembly_get_image)(MonoAssembly*) = nullptr;
-        inline void(__cdecl* mono_assembly_foreach)(void (*)(MonoAssembly*, void*), void*) = nullptr;
-        inline MonoAssemblyName* (__cdecl* mono_assembly_get_name)(MonoAssembly*) = nullptr;
-        inline const char* (__cdecl* mono_assembly_name_get_name)(MonoAssemblyName*) = nullptr;
 
-        // Class & Methods & Fields
+        // Unity loads images by logical name; mono_image_loaded is preferred over mono_domain_assembly_open
+        inline MonoImage* (__cdecl* mono_image_loaded)(const char*) = nullptr;
+        inline const char* (__cdecl* mono_image_get_name)(MonoImage*) = nullptr;
+        inline const char* (__cdecl* mono_image_get_filename)(MonoImage*) = nullptr;
+
         inline MonoClass* (__cdecl* mono_class_from_name)(MonoImage*, const char*, const char*) = nullptr;
-        inline MonoClass* (__cdecl* mono_class_get_parent)(MonoClass*) = nullptr;
         inline MonoMethod* (__cdecl* mono_class_get_method_from_name)(MonoClass*, const char*, int) = nullptr;
-        inline MonoProperty* (__cdecl* mono_class_get_property_from_name)(MonoClass*, const char*) = nullptr;
-        inline MonoMethod* (__cdecl* mono_property_get_get_method)(MonoProperty*) = nullptr;
         inline MonoClassField* (__cdecl* mono_class_get_field_from_name)(MonoClass*, const char*) = nullptr;
         inline MonoClassField* (__cdecl* mono_class_get_fields)(MonoClass*, void**) = nullptr;
         inline const char* (__cdecl* mono_field_get_name)(MonoClassField*) = nullptr;
@@ -196,7 +199,6 @@ namespace mono {
 
         inline MonoObject* (__cdecl* mono_field_get_value_object)(MonoDomain*, MonoClassField*, MonoObject*) = nullptr;
 
-        // Object / String / Invoke
         inline MonoObject* (__cdecl* mono_object_new)(MonoDomain*, MonoClass*) = nullptr;
         inline MonoObject* (__cdecl* mono_runtime_invoke)(MonoMethod*, void*, void**, MonoObject**) = nullptr;
         inline void* (__cdecl* mono_object_unbox)(MonoObject*) = nullptr;
@@ -205,22 +207,17 @@ namespace mono {
         inline char* (__cdecl* mono_string_to_utf8)(MonoString*) = nullptr;
         inline void(__cdecl* mono_free)(void*) = nullptr;
 
-        inline MonoClass* (__cdecl* mono_get_enum_class)() = nullptr; // optional, usually not needed
-        inline mono::_internal::MonoType* (__cdecl* mono_field_get_type)(MonoClassField*) = nullptr; // optional
-        inline mono::_internal::MonoClass* (__cdecl* mono_type_get_class)(MonoType*) = nullptr;      // optional
-        inline mono::_internal::MonoType* (__cdecl* mono_class_get_type)(MonoClass*) = nullptr;      // optional
-        inline MonoObject* (__cdecl* mono_type_get_object)(MonoDomain*, MonoType*) = nullptr;       // optional
-        inline mono::_internal::MonoDomain* (__cdecl* mono_object_get_domain)(MonoObject*) = nullptr; // optional
+        inline MonoClass* (__cdecl* mono_get_enum_class)() = nullptr;
+        inline mono::_internal::MonoType* (__cdecl* mono_field_get_type)(MonoClassField*) = nullptr;
+        inline mono::_internal::MonoClass* (__cdecl* mono_type_get_class)(MonoType*) = nullptr;
+        inline mono::_internal::MonoDomain* (__cdecl* mono_object_get_domain)(MonoObject*) = nullptr;
 
-        // Array
         inline uintptr_t(__cdecl* mono_array_length)(MonoArray*) = nullptr;
         inline void* (__cdecl* mono_array_addr_with_size)(MonoArray*, int, uintptr_t) = nullptr;
 
-        // Optional
         inline mono::_internal::MonoClass* (__cdecl* mono_object_get_class)(MonoObject*) = nullptr;
         inline bool(__cdecl* mono_class_is_enum)(MonoClass*) = nullptr;
 
-        // ===== Lazy Binding =====
         inline MonoStatus ensure_exports() {
             auto bind_req = [](auto& dst, const char* name, MonoStatus err) -> MonoStatus {
                 if (!dst) {
@@ -237,25 +234,20 @@ namespace mono {
                 }
                 };
 
-            // Domain / Thread
             if (auto s = bind_req(mono_get_root_domain, "mono_get_root_domain", MonoStatus::Missing_get_root_domain); s != MonoStatus::OK) return s;
             if (auto s = bind_req(mono_thread_attach, "mono_thread_attach", MonoStatus::Missing_thread_attach);   s != MonoStatus::OK) return s;
             bind_opt(mono_thread_detach, "mono_thread_detach");
             bind_opt(mono_thread_current, "mono_thread_current");
 
-            // Assembly / Image
             if (auto s = bind_req(mono_domain_assembly_open, "mono_domain_assembly_open", MonoStatus::Missing_domain_assembly_open); s != MonoStatus::OK) return s;
             if (auto s = bind_req(mono_assembly_get_image, "mono_assembly_get_image", MonoStatus::Missing_assembly_get_image);   s != MonoStatus::OK) return s;
-            bind_opt(mono_assembly_foreach, "mono_assembly_foreach");
-            bind_opt(mono_assembly_get_name, "mono_assembly_get_name");
-            bind_opt(mono_assembly_name_get_name, "mono_assembly_name_get_name");
 
-            // Class / Method / Field
+            bind_opt(mono_image_loaded, "mono_image_loaded");
+            bind_opt(mono_image_get_name, "mono_image_get_name");
+            bind_opt(mono_image_get_filename, "mono_image_get_filename");
+
             if (auto s = bind_req(mono_class_from_name, "mono_class_from_name", MonoStatus::Missing_class_from_name);            s != MonoStatus::OK) return s;
-            bind_opt(mono_class_get_parent, "mono_class_get_parent");
             if (auto s = bind_req(mono_class_get_method_from_name, "mono_class_get_method_from_name", MonoStatus::Missing_class_get_method_from_name); s != MonoStatus::OK) return s;
-            bind_opt(mono_class_get_property_from_name, "mono_class_get_property_from_name");
-            bind_opt(mono_property_get_get_method, "mono_property_get_get_method");
             if (auto s = bind_req(mono_class_get_field_from_name, "mono_class_get_field_from_name", MonoStatus::Missing_class_get_field_from_name);  s != MonoStatus::OK) return s;
             if (auto s = bind_req(mono_class_get_fields, "mono_class_get_fields", MonoStatus::Missing_class_get_field_from_name);    s != MonoStatus::OK) return s;
             if (auto s = bind_req(mono_field_get_name, "mono_field_get_name", MonoStatus::Missing_class_get_field_from_name);    s != MonoStatus::OK) return s;
@@ -269,26 +261,20 @@ namespace mono {
 
             if (auto s = bind_req(mono_field_get_value_object, "mono_field_get_value_object", MonoStatus::Missing_field_get_set);                s != MonoStatus::OK) return s;
 
-            // Object / Invoke / Unbox
             if (auto s = bind_req(mono_object_new, "mono_object_new", MonoStatus::GetProcAddressFailed);     s != MonoStatus::OK) return s;
             if (auto s = bind_req(mono_runtime_invoke, "mono_runtime_invoke", MonoStatus::Missing_runtime_invoke);   s != MonoStatus::OK) return s;
             if (auto s = bind_req(mono_object_unbox, "mono_object_unbox", MonoStatus::Missing_object_unbox);     s != MonoStatus::OK) return s;
 
-            // Strings
             bind_opt(mono_string_new, "mono_string_new");
             bind_opt(mono_string_to_utf8, "mono_string_to_utf8");
             bind_opt(mono_free, "mono_free");
 
-            // Array
             bind_opt(mono_array_length, "mono_array_length");
             bind_opt(mono_array_addr_with_size, "mono_array_addr_with_size");
 
-            // Optional helpers
             bind_opt(mono_get_enum_class, "mono_get_enum_class");
             bind_opt(mono_field_get_type, "mono_field_get_type");
             bind_opt(mono_type_get_class, "mono_type_get_class");
-            bind_opt(mono_class_get_type, "mono_class_get_type");
-            bind_opt(mono_type_get_object, "mono_type_get_object");
             bind_opt(mono_object_get_domain, "mono_object_get_domain");
             bind_opt(mono_object_get_class, "mono_object_get_class");
             bind_opt(mono_class_is_enum, "mono_class_is_enum");
@@ -296,7 +282,6 @@ namespace mono {
             return MonoStatus::OK;
         }
 
-        // Assembly-Lookup + Cache
         inline Result<MonoAssembly*> find_assembly(std::string_view assembly_name) {
             if (assembly_name.empty()) return { MonoStatus::InvalidArgs, nullptr };
             if (auto s = ensure_exports(); s != MonoStatus::OK) return { s, nullptr };
@@ -310,97 +295,115 @@ namespace mono {
             auto* domain = mono_get_root_domain ? mono_get_root_domain() : nullptr;
             if (!domain) return { MonoStatus::DomainUnavailable, nullptr };
 
-            MonoAssembly* ass = nullptr;
-
-            // Simple name: "Assembly-CSharp.dll" -> "Assembly-CSharp", "Assembly-CSharp" -> "Assembly-CSharp"
-            std::string aname_str(assembly_name);
-            std::string simple_name = aname_str;
-            if (simple_name.size() >= 4 && simple_name.compare(simple_name.size() - 4, 4, ".dll") == 0)
-                simple_name.resize(simple_name.size() - 4);
-
-            if (mono_assembly_foreach && mono_assembly_get_name && mono_assembly_name_get_name) {
-                struct Ctx { MonoAssembly* found = nullptr; const char* simple = nullptr; } ctx;
-                ctx.simple = simple_name.c_str();
-                mono_assembly_foreach([](MonoAssembly* a, void* ud) {
-                    Ctx* c = static_cast<Ctx*>(ud);
-                    MonoAssemblyName* aname = mono_assembly_get_name(a);
-                    if (!aname) return;
-                    const char* n = mono_assembly_name_get_name(aname);
-                    if (n && c->simple && std::strcmp(n, c->simple) == 0)
-                        c->found = a;
-                    }, &ctx);
-                ass = ctx.found;
-            }
-
-            if (!ass) {
-                ass = mono_domain_assembly_open(domain, aname_str.c_str());
-                if (!ass) return { MonoStatus::AssemblyNotFound, nullptr };
-            }
+            MonoAssembly* ass = mono_domain_assembly_open(domain, std::string(assembly_name).c_str());
+            if (!ass) return { MonoStatus::AssemblyNotFound, nullptr };
 
             {
                 std::scoped_lock lk(g_cache_mtx);
-                g_assembly_cache.emplace(aname_str, ass);
+                g_assembly_cache.emplace(std::string(assembly_name), ass);
             }
             return { MonoStatus::OK, ass };
         }
 
+        // Image cache: mono_image_loaded with/without ".dll", then find_assembly + mono_assembly_get_image
+        inline Result<MonoImage*> find_image(std::string_view image_name) {
+            if (image_name.empty()) return { MonoStatus::InvalidArgs, nullptr };
+            if (auto s = ensure_exports(); s != MonoStatus::OK) return { s, nullptr };
+
+            const std::string key(image_name);
+
+            {
+                std::scoped_lock lk(g_image_cache_mtx);
+                if (auto it = g_image_cache.find(key); it != g_image_cache.end())
+                    return { MonoStatus::OK, it->second };
+            }
+
+            MonoImage* img = nullptr;
+
+            if (mono_image_loaded) {
+                img = mono_image_loaded(key.c_str());
+
+                if (!img) {
+                    constexpr std::string_view kDll = ".dll";
+                    std::string alt;
+                    if (key.size() > kDll.size() &&
+                        std::string_view(key).substr(key.size() - kDll.size()) == kDll) {
+                        alt.assign(key, 0, key.size() - kDll.size());
+                    }
+                    else {
+                        alt.reserve(key.size() + kDll.size());
+                        alt.assign(key);
+                        alt.append(kDll);
+                    }
+                    img = mono_image_loaded(alt.c_str());
+                }
+            }
+
+            if (!img) {
+                auto ass = find_assembly(image_name);
+                if (ass && mono_assembly_get_image) {
+                    img = mono_assembly_get_image(ass.value);
+                }
+                else if (!ass) {
+                    return { ass.status, nullptr };
+                }
+            }
+
+            if (!img) return { MonoStatus::AssemblyNotFound, nullptr };
+
+            {
+                std::scoped_lock lk(g_image_cache_mtx);
+                g_image_cache.emplace(key, img);
+            }
+            return { MonoStatus::OK, img };
+        }
+
     } // _internal
 
-    // ---------- ThreadScope (RAII) ----------
+    // ThreadScope: attach once per thread (mono_thread_attach is idempotent). Never call mono_thread_current
+    // on a never-attached worker (TLS can crash). Intentionally never detach (hooks may run later on same thread)
     struct ThreadScope {
-        bool       attached_by_us{ false };
-        _internal::MonoThread* attached_thread{ nullptr };
-        inline static thread_local int depth{ 0 };
+        inline static thread_local bool s_attached_this_thread{ false };
 
-        ThreadScope() {
+        ThreadScope() noexcept {
+            if (s_attached_this_thread) return;
             if (_internal::ensure_exports() != MonoStatus::OK) return;
-
             if (!_internal::mono_get_root_domain || !_internal::mono_thread_attach) return;
 
             auto* dom = _internal::mono_get_root_domain();
             if (!dom) return;
 
-            attached_thread = _internal::mono_thread_attach(dom);
-            attached_by_us = (attached_thread != nullptr);
-            if (attached_by_us) ++depth;
+            auto* th = _internal::mono_thread_attach(dom);
+            if (th) s_attached_this_thread = true;
         }
 
-        ~ThreadScope() noexcept {
-            if (depth > 0) --depth;
-            if (attached_by_us && depth == 0 && _internal::mono_thread_detach && attached_thread) {
-                _internal::mono_thread_detach(attached_thread);
-            }
-        }
+        ~ThreadScope() noexcept = default;
     };
 
-    // ---------- Init / Cleanup ----------
-    inline MonoStatus init() {
-        auto mod = _internal::ensure_mono_module();
-        if (!mod) return mod.status;
-        return _internal::ensure_exports();
-    }
-
+    // No explicit init(); module and exports resolve lazily (call_once / null checks)
     inline void cleanup() {
-        std::scoped_lock lk(_internal::g_cache_mtx);
-        _internal::g_assembly_cache.clear();
+        {
+            std::scoped_lock lk(_internal::g_cache_mtx);
+            _internal::g_assembly_cache.clear();
+        }
+        {
+            std::scoped_lock lk(_internal::g_image_cache_mtx);
+            _internal::g_image_cache.clear();
+        }
     }
-
-    // ---------- Class & Method ----------
 
     inline Result<_internal::MonoClass*>
         find_class(const std::string& ns, const std::string& class_name, const std::string& assembly_name) {
         ThreadScope scope;
-        if (class_name.empty() || assembly_name.empty())
+        if (ns.empty() || class_name.empty() || assembly_name.empty())
             return { MonoStatus::InvalidArgs, nullptr };
 
-        auto a = _internal::find_assembly(assembly_name);
-        if (!a) return { a.status, nullptr };
+        auto img_r = _internal::find_image(assembly_name);
+        if (!img_r) return { img_r.status, nullptr };
 
-        auto* img = _internal::mono_assembly_get_image ? _internal::mono_assembly_get_image(a.value) : nullptr;
-        if (!img) return { MonoStatus::ImageUnavailable, nullptr };
-
-        auto* klass = _internal::mono_class_from_name(img, ns.c_str(), class_name.c_str());
+        auto* klass = _internal::mono_class_from_name(img_r.value, ns.c_str(), class_name.c_str());
         if (!klass) return { MonoStatus::ClassNotFound, nullptr };
+
         return { MonoStatus::OK, klass };
     }
 
@@ -408,7 +411,7 @@ namespace mono {
         get_method(const std::string& ns, const std::string& class_name, const std::string& method_name,
             const std::string& assembly_name, std::optional<int> param_count = std::nullopt) {
         ThreadScope scope;
-        if (class_name.empty() || method_name.empty() || assembly_name.empty())
+        if (ns.empty() || class_name.empty() || method_name.empty() || assembly_name.empty())
             return { MonoStatus::InvalidArgs, nullptr };
 
         auto c = find_class(ns, class_name, assembly_name);
@@ -430,43 +433,11 @@ namespace mono {
         return { MonoStatus::OK, mi };
     }
 
-    inline Result<_internal::MonoClass*> get_object_class(void* obj) {
-        ThreadScope scope;
-        if (!obj) return { MonoStatus::InvalidArgs, nullptr };
-        if (!_internal::mono_object_get_class) {
-            if (auto s = _internal::ensure_exports(); s != MonoStatus::OK) return { s, nullptr };
-            if (!_internal::mono_object_get_class) return { MonoStatus::InvalidArgs, nullptr };
-        }
-        auto* klass = _internal::mono_object_get_class(reinterpret_cast<_internal::MonoObject*>(obj));
-        if (!klass) return { MonoStatus::ClassNotFound, nullptr };
-        return { MonoStatus::OK, klass };
-    }
-
-    inline Result<_internal::MonoMethod*>
-        get_method_from_class(_internal::MonoClass* klass, const std::string& method_name,
-            std::optional<int> param_count = std::nullopt) {
-        ThreadScope scope;
-        if (!klass || method_name.empty()) return { MonoStatus::InvalidArgs, nullptr };
-        using MM = _internal::MonoMethod*;
-        MM mi = nullptr;
-        if (param_count.has_value()) {
-            mi = _internal::mono_class_get_method_from_name(klass, method_name.c_str(), *param_count);
-        }
-        else {
-            for (int i = 0; i <= 16 && !mi; ++i)
-                mi = _internal::mono_class_get_method_from_name(klass, method_name.c_str(), i);
-        }
-        if (!mi) return { MonoStatus::MethodNotFound, nullptr };
-        return { MonoStatus::OK, mi };
-    }
-
-    // ---------- Fields ----------
-
     inline Result<_internal::MonoClassField*>
         get_field(const std::string& ns, const std::string& class_name,
             const std::string& field_name, const std::string& assembly_name) {
         ThreadScope scope;
-        if (class_name.empty() || field_name.empty() || assembly_name.empty())
+        if (ns.empty() || class_name.empty() || field_name.empty() || assembly_name.empty())
             return { MonoStatus::InvalidArgs, nullptr };
 
         auto c = find_class(ns, class_name, assembly_name);
@@ -546,8 +517,6 @@ namespace mono {
         return MonoStatus::OK;
     }
 
-    // ---------- Object Creation ----------
-
     template <typename T = void*>
     inline Result<T> create_object(_internal::MonoClass* klass) {
         ThreadScope scope;
@@ -581,8 +550,7 @@ namespace mono {
             auto mi_ctor = get_method(ns, class_name, ".ctor", assembly_name, sizeof...(CtorArgs));
             if (!mi_ctor) return { mi_ctor.status, nullptr };
 
-            // ctor_args → runtime_invoke, result ignored
-            void* argv[sizeof...(CtorArgs)] = { reinterpret_cast<void*>(&ctor_args)... };
+            void* argv[sizeof...(CtorArgs)] = { _internal::mono_arg_ptr(ctor_args)... };
             _internal::MonoObject* exc = nullptr;
             _internal::MonoObject* res = _internal::mono_runtime_invoke(mi_ctor.value,
                 reinterpret_cast<void*>(r.value),
@@ -593,9 +561,8 @@ namespace mono {
         return r;
     }
 
-    // ---------- Strings ----------
-
     namespace String {
+
         inline Result<void*> CreateNewString(const std::string& s) {
             ThreadScope scope;
             if (s.empty()) return { MonoStatus::InvalidArgs, nullptr };
@@ -631,12 +598,8 @@ namespace mono {
             if (_internal::mono_free) _internal::mono_free(utf8);
             return out;
         }
+
     } // namespace String
-
-    inline Result<void*> CreateNewString(const std::string& s) { return String::CreateNewString(s); }
-    inline std::string   convert_to_std_string(void* p_sys_str) { return String::convert_to_std_string(p_sys_str); }
-
-    // ---------- Managed Calls (mono_runtime_invoke) ----------
 
     template <typename Ret, typename... Args>
     inline auto call_function(_internal::MonoMethod* method, void* instance, Args... args)
@@ -664,7 +627,7 @@ namespace mono {
             result = _internal::mono_runtime_invoke(method, instance, nullptr, &exc);
         }
         else {
-            void* argv[sizeof...(Args)] = { reinterpret_cast<void*>(&args)... };
+            void* argv[sizeof...(Args)] = { _internal::mono_arg_ptr(args)... };
             result = _internal::mono_runtime_invoke(method, instance, argv, &exc);
         }
 
@@ -677,7 +640,6 @@ namespace mono {
             return R{ MonoStatus::OK };
         }
         else if constexpr (std::is_pointer_v<Ret>) {
-            // Reference types: direct MonoObject* return
             return R{ MonoStatus::OK, reinterpret_cast<Ret>(result) };
         }
         else {
@@ -691,45 +653,214 @@ namespace mono {
         }
     }
 
-    // ---------- Arrays ----------
+    namespace Type {
 
-    inline Result<int> array_get_length_1d(void* arr) {
-        ThreadScope scope;
-        if (!arr) return { MonoStatus::InvalidArgs, 0 };
-
-        if (!_internal::mono_array_length) {
-            (void)_internal::ensure_exports();
-            if (!_internal::mono_array_length) return { MonoStatus::GetProcAddressFailed, 0 };
+        namespace _detail {
+            inline Result<mono::_internal::MonoMethod*> resolve_get_type_method() {
+                static constexpr const char* kAssemblyCandidates[] = {
+                    "mscorlib.dll",
+                    "mscorlib",
+                };
+                MonoStatus last = MonoStatus::MethodNotFound;
+                for (auto* asm_name : kAssemblyCandidates) {
+                    auto m = mono::get_method("System", "Type", "GetType", asm_name, 1);
+                    if (m) return m;
+                    last = m.status;
+                }
+                LOG(LogLevel::ERR, "[mono::Type] failed to resolve System.Type.GetType (last status=",
+                    to_string(last), ")");
+                return { last, nullptr };
+            }
         }
 
-        auto len = static_cast<int>(_internal::mono_array_length(reinterpret_cast<_internal::MonoArray*>(arr)));
-        return { MonoStatus::OK, len };
-    }
+        // System.Type.GetType(string) via existing MonoString*
+        inline Result<void*> GetType(void* type_name_mono_string) {
+            ThreadScope scope;
+            if (!type_name_mono_string) return { MonoStatus::InvalidArgs, nullptr };
 
-    template <typename Ret>
-    inline Result<Ret> array_get_element_1d(void* arr, uintptr_t idx) {
-        ThreadScope scope;
-        if (!arr) return { MonoStatus::InvalidArgs, Ret{} };
+            auto method = _detail::resolve_get_type_method();
+            if (!method) return { method.status, nullptr };
 
-        if (!_internal::mono_array_length || !_internal::mono_array_addr_with_size) {
-            (void)_internal::ensure_exports();
-            if (!_internal::mono_array_length || !_internal::mono_array_addr_with_size)
-                return { MonoStatus::GetProcAddressFailed, Ret{} };
+            auto result = call_function<void*>(method.value, nullptr, type_name_mono_string);
+            if (!result) return { result.status, nullptr };
+            if (!result.value) return { MonoStatus::ClassNotFound, nullptr };
+            return { MonoStatus::OK, result.value };
         }
 
-        auto* mono_arr = reinterpret_cast<_internal::MonoArray*>(arr);
-        uintptr_t len = _internal::mono_array_length(mono_arr);
-        if (idx >= len) return { MonoStatus::InvalidArgs, Ret{} };
+        inline Result<void*> GetType(const std::string& type_name) {
+            ThreadScope scope;
+            if (type_name.empty()) return { MonoStatus::InvalidArgs, nullptr };
 
-        void* elemPtr = _internal::mono_array_addr_with_size(mono_arr, static_cast<int>(sizeof(Ret)), idx);
-        Ret out{};
-        std::memcpy(&out, elemPtr, sizeof(Ret));
-        return { MonoStatus::OK, out };
-    }
+            auto mono_str = String::CreateNewString(type_name);
+            if (!mono_str) return { mono_str.status, nullptr };
 
-    // ---------- Enum Utils ----------
+            return GetType(mono_str.value);
+        }
+
+    } // namespace Type
+
+    namespace UnityEngine {
+
+        namespace _detail {
+            inline Result<mono::_internal::MonoMethod*>
+                resolve_object_method(const char* method_name, int param_count) {
+                static constexpr const char* kAssemblyCandidates[] = {
+                    "UnityEngine.CoreModule.dll",
+                    "UnityEngine.CoreModule"
+                };
+                MonoStatus last = MonoStatus::MethodNotFound;
+                for (auto* asm_name : kAssemblyCandidates) {
+                    auto m = mono::get_method("UnityEngine", "Object", method_name, asm_name, param_count);
+                    if (m) return m;
+                    last = m.status;
+                }
+                return { last, nullptr };
+            }
+
+            inline Result<mono::_internal::MonoMethod*>
+                resolve_find_object_of_type_method(int param_count) {
+                return resolve_object_method("FindObjectOfType", param_count);
+            }
+
+            inline Result<mono::_internal::MonoMethod*>
+                resolve_find_objects_of_type_method(int param_count) {
+                return resolve_object_method("FindObjectsOfType", param_count);
+            }
+        }
+
+        // UnityEngine.Object.FindObjectOfType; no match => { OK, nullptr }
+        inline Result<void*> FindObjectOfType(void* type_instance, bool include_inactive = false) {
+            ThreadScope scope;
+            if (!type_instance) return { MonoStatus::InvalidArgs, nullptr };
+
+            auto method = _detail::resolve_find_object_of_type_method(2);
+            if (!method) {
+                auto m1 = _detail::resolve_find_object_of_type_method(1);
+                if (!m1) {
+                    LOG(LogLevel::ERR, "[mono::UnityEngine] FindObjectOfType: no overload available");
+                    return { method.status, nullptr };
+                }
+                auto r = call_function<void*>(m1.value, nullptr, type_instance);
+                if (!r) return { r.status, nullptr };
+                return { MonoStatus::OK, r.value };
+            }
+
+            auto result = call_function<void*>(method.value, nullptr,
+                type_instance, include_inactive);
+            if (!result) return { result.status, nullptr };
+            return { MonoStatus::OK, result.value };
+        }
+
+        inline Result<void*> FindObjectOfType(const std::string& type_name,
+            bool include_inactive = false) {
+            ThreadScope scope;
+            if (type_name.empty()) return { MonoStatus::InvalidArgs, nullptr };
+
+            auto type = mono::Type::GetType(type_name);
+            if (!type) {
+                LOG(LogLevel::ERR, "[mono::UnityEngine] FindObjectOfType: failed to resolve type '",
+                    type_name, "' (status=", to_string(type.status), ")");
+                return { type.status, nullptr };
+            }
+
+            return FindObjectOfType(type.value, include_inactive);
+        }
+
+        // UnityEngine.Object.FindObjectsOfType; empty array is valid.
+        inline Result<void*> FindObjectsOfType(void* type_instance, bool include_inactive = false) {
+            ThreadScope scope;
+            if (!type_instance) return { MonoStatus::InvalidArgs, nullptr };
+
+            auto method = _detail::resolve_find_objects_of_type_method(2);
+            if (!method) {
+                auto m1 = _detail::resolve_find_objects_of_type_method(1);
+                if (!m1) {
+                    LOG(LogLevel::ERR, "[mono::UnityEngine] FindObjectsOfType: no overload available");
+                    return { method.status, nullptr };
+                }
+                auto r = call_function<void*>(m1.value, nullptr, type_instance);
+                if (!r) return { r.status, nullptr };
+                return { MonoStatus::OK, r.value };
+            }
+
+            auto result = call_function<void*>(method.value, nullptr,
+                type_instance, include_inactive);
+            if (!result) return { result.status, nullptr };
+            return { MonoStatus::OK, result.value };
+        }
+
+        inline Result<void*> FindObjectsOfType(const std::string& type_name,
+            bool include_inactive = false) {
+            ThreadScope scope;
+            if (type_name.empty()) return { MonoStatus::InvalidArgs, nullptr };
+
+            auto type = mono::Type::GetType(type_name);
+            if (!type) {
+                LOG(LogLevel::ERR, "[mono::UnityEngine] FindObjectsOfType: failed to resolve type '",
+                    type_name, "' (status=", to_string(type.status), ")");
+                return { type.status, nullptr };
+            }
+
+            return FindObjectsOfType(type.value, include_inactive);
+        }
+
+        // UnityEngine.Object.name (CIL get_name)
+        inline Result<std::string> get_name(void* unity_object) {
+            ThreadScope scope;
+            if (!unity_object) return { MonoStatus::InvalidArgs, {} };
+
+            auto method = _detail::resolve_object_method("get_name", 0);
+            if (!method) return { method.status, {} };
+
+            auto result = call_function<void*>(method.value, unity_object);
+            if (!result) return { result.status, {} };
+            if (!result.value) return { MonoStatus::OK, {} };
+
+            return { MonoStatus::OK, mono::String::convert_to_std_string(result.value) };
+        }
+
+    } // namespace UnityEngine
+
+    namespace Array {
+
+        inline Result<int> array_get_length_1d(void* arr) {
+            ThreadScope scope;
+            if (!arr) return { MonoStatus::InvalidArgs, 0 };
+
+            if (!_internal::mono_array_length) {
+                (void)_internal::ensure_exports();
+                if (!_internal::mono_array_length) return { MonoStatus::GetProcAddressFailed, 0 };
+            }
+
+            auto len = static_cast<int>(_internal::mono_array_length(reinterpret_cast<_internal::MonoArray*>(arr)));
+            return { MonoStatus::OK, len };
+        }
+
+        template <typename Ret>
+        inline Result<Ret> array_get_element_1d(void* arr, uintptr_t idx) {
+            ThreadScope scope;
+            if (!arr) return { MonoStatus::InvalidArgs, Ret{} };
+
+            if (!_internal::mono_array_length || !_internal::mono_array_addr_with_size) {
+                (void)_internal::ensure_exports();
+                if (!_internal::mono_array_length || !_internal::mono_array_addr_with_size)
+                    return { MonoStatus::GetProcAddressFailed, Ret{} };
+            }
+
+            auto* mono_arr = reinterpret_cast<_internal::MonoArray*>(arr);
+            uintptr_t len = _internal::mono_array_length(mono_arr);
+            if (idx >= len) return { MonoStatus::InvalidArgs, Ret{} };
+
+            void* elemPtr = _internal::mono_array_addr_with_size(mono_arr, static_cast<int>(sizeof(Ret)), idx);
+            Ret out{};
+            std::memcpy(&out, elemPtr, sizeof(Ret));
+            return { MonoStatus::OK, out };
+        }
+
+    } // namespace Array
 
     namespace Enum {
+
         struct Key {
             std::string ns;
             std::string name;
@@ -772,7 +903,6 @@ namespace mono {
             auto klass = find_class(key.ns, key.name, key.assembly);
             if (!klass) return { klass.status, nullptr };
 
-            // If mono_class_is_enum is missing, skip the check
             if (_internal::mono_class_is_enum && !_internal::mono_class_is_enum(klass.value))
                 return { MonoStatus::InvalidArgs, nullptr };
 
@@ -787,7 +917,6 @@ namespace mono {
                 const char* fname = _internal::mono_field_get_name(fi);
                 if (!fname || std::strcmp(fname, "value__") == 0) continue;
 
-                // Get enum values via value_object + unbox
                 auto* domain = _internal::mono_get_root_domain ? _internal::mono_get_root_domain() : nullptr;
                 if (!domain) break;
 
@@ -873,78 +1002,5 @@ namespace mono {
         }
 
     } // namespace Enum
-
-    // ---------- Unity Helpers ----------
-
-    // FindAnyObjectByType: Wrapper for UnityEngine.Object.FindAnyObjectByType(Type).
-    // Create System.Type from MonoClass via mono_class_get_type + mono_type_get_object.
-    inline Result<void*> FindAnyObjectByType(_internal::MonoClass* klass) {
-        ThreadScope scope;
-        if (!klass) return { MonoStatus::InvalidArgs, nullptr };
-        { auto s = _internal::ensure_exports(); if (s != MonoStatus::OK) return { s, nullptr }; }
-
-        auto* domain = _internal::mono_get_root_domain ? _internal::mono_get_root_domain() : nullptr;
-        if (!domain) return { MonoStatus::DomainUnavailable, nullptr };
-        if (!_internal::mono_class_get_type || !_internal::mono_type_get_object)
-            return { MonoStatus::InvalidArgs, nullptr };
-
-        _internal::MonoType* type = _internal::mono_class_get_type(klass);
-        if (!type) return { MonoStatus::InvalidArgs, nullptr };
-        _internal::MonoObject* type_obj = _internal::mono_type_get_object(domain, type);
-        if (!type_obj) return { MonoStatus::InvalidArgs, nullptr };
-
-        auto find_method = get_method("UnityEngine", "Object", "FindAnyObjectByType", "UnityEngine.CoreModule", 1);
-        if (!find_method) return { find_method.status, nullptr };
-
-        void* argv[1] = { type_obj };
-        _internal::MonoObject* exc = nullptr;
-        _internal::MonoObject* result = _internal::mono_runtime_invoke(
-            find_method.value,
-            nullptr,
-            argv,
-            &exc
-        );
-
-        if (exc) return { MonoStatus::InvokeException, nullptr };
-        if (!result) return { MonoStatus::OK, nullptr };
-
-        return { MonoStatus::OK, result };
-    }
-
-    // Overload: FindAnyObjectByType with namespace, class name and assembly
-    inline Result<void*> FindAnyObjectByType(
-        const std::string& ns,
-        const std::string& class_name,
-        const std::string& assembly_name) {
-        auto klass = find_class(ns, class_name, assembly_name);
-        if (!klass) return { klass.status, nullptr };
-        return FindAnyObjectByType(klass.value);
-    }
-
-    // MonoSingleton<T>-style instance access: property "Instance" or method "get_Instance",
-    // in class or base classes. Returns the getter MonoMethod*.
-    inline Result<_internal::MonoMethod*> get_instance_accessor(
-        const std::string& ns, const std::string& class_name, const std::string& assembly_name) {
-        ThreadScope scope;
-        if (class_name.empty() || assembly_name.empty()) return { MonoStatus::InvalidArgs, nullptr };
-
-        auto c = find_class(ns, class_name, assembly_name);
-        if (!c) return { c.status, nullptr };
-
-        for (_internal::MonoClass* k = c.value; k; k = _internal::mono_class_get_parent ? _internal::mono_class_get_parent(k) : nullptr) {
-            if (_internal::mono_class_get_property_from_name && _internal::mono_property_get_get_method) {
-                _internal::MonoProperty* prop = _internal::mono_class_get_property_from_name(k, "Instance");
-                if (prop) {
-                    _internal::MonoMethod* getter = _internal::mono_property_get_get_method(prop);
-                    if (getter) return { MonoStatus::OK, getter };
-                }
-            }
-            for (int n = 0; n <= 16; ++n) {
-                _internal::MonoMethod* mi = _internal::mono_class_get_method_from_name(k, "get_Instance", n);
-                if (mi) return { MonoStatus::OK, mi };
-            }
-        }
-        return { MonoStatus::MethodNotFound, nullptr };
-    }
 
 } // namespace mono
