@@ -18,8 +18,6 @@
 #include <algorithm>
 #include <cstring>
 
-#include "Loggy/loggy.hpp"
-
 #define MONO_DLL_CANDIDATE_1 "mono-2.0-bdwgc.dll"
 #define MONO_DLL_CANDIDATE_2 "mono-2.0-sgen.dll"
 #define MONO_DLL_CANDIDATE_3 "mono.dll"
@@ -667,8 +665,6 @@ namespace mono {
                     if (m) return m;
                     last = m.status;
                 }
-                LOG(LogLevel::ERR, "[mono::Type] failed to resolve System.Type.GetType (last status=",
-                    to_string(last), ")");
                 return { last, nullptr };
             }
         }
@@ -737,7 +733,6 @@ namespace mono {
             if (!method) {
                 auto m1 = _detail::resolve_find_object_of_type_method(1);
                 if (!m1) {
-                    LOG(LogLevel::ERR, "[mono::UnityEngine] FindObjectOfType: no overload available");
                     return { method.status, nullptr };
                 }
                 auto r = call_function<void*>(m1.value, nullptr, type_instance);
@@ -758,8 +753,6 @@ namespace mono {
 
             auto type = mono::Type::GetType(type_name);
             if (!type) {
-                LOG(LogLevel::ERR, "[mono::UnityEngine] FindObjectOfType: failed to resolve type '",
-                    type_name, "' (status=", to_string(type.status), ")");
                 return { type.status, nullptr };
             }
 
@@ -775,7 +768,6 @@ namespace mono {
             if (!method) {
                 auto m1 = _detail::resolve_find_objects_of_type_method(1);
                 if (!m1) {
-                    LOG(LogLevel::ERR, "[mono::UnityEngine] FindObjectsOfType: no overload available");
                     return { method.status, nullptr };
                 }
                 auto r = call_function<void*>(m1.value, nullptr, type_instance);
@@ -796,8 +788,6 @@ namespace mono {
 
             auto type = mono::Type::GetType(type_name);
             if (!type) {
-                LOG(LogLevel::ERR, "[mono::UnityEngine] FindObjectsOfType: failed to resolve type '",
-                    type_name, "' (status=", to_string(type.status), ")");
                 return { type.status, nullptr };
             }
 
